@@ -1,116 +1,96 @@
 <?php
-
 use \Psr\Http\Message\ServerRequestInterface as Request;
 use \Psr\Http\Message\ResponseInterface as Response;
-
 use \Firebase\JWT\JWT;
-
-
-// Authenticate route.
-$app->post('/authenticate', function (Request $request, Response $response) {
+$app->post('/login', function (Request $request, Response $response) {
     $data = $request->getParsedBody();
-
     $result = file_get_contents('./users.json');
     $users = json_decode($result, true);
-
-    $login = $data['user_login'];
-    $password = $data['user_password'];
-
+    $userName = $data['userName'];
+    $password = $data['password'];
     foreach ($users as $key => $user) {
-        if ($user['user_login'] == $login && $user['user_pwd'] == $password) {
-            $current_user = $user;
+        if ($user['userName'] == $userName && $user['password'] == $password) {
+            $currentUser = $user;
         }
     }
-
-    if (!isset($current_user)) {
+    if (!isset($currentUser)) {
         echo json_encode("No user found");
     } else {
-
-        // Find a corresponding token.
-        $sql = "SELECT * FROM tokens
-            WHERE user_id = :user_id AND date_expiration >" . time();
-
-        $token_from_db = false;
-        try {
-            $db = $this->db;
-            $stmt = $db->prepare($sql);
-            $stmt->bindParam("user_id", $current_user['user_id']);
-            $stmt->execute();
-            $token_from_db = $stmt->fetchObject();
-            $db = null;
-
-            if ($token_from_db) {
-                echo json_encode([
-                    "token"      => $token_from_db->value,
-                    "user_login" => $token_from_db->user_id
-                ]);
-            }
-        } catch (PDOException $e) {
-            echo '{"error":{"text":' . $e->getMessage() . '}}';
-        }
-
-        // Create a new token if a user is found but not a token corresponding to whom.
-        if (count($current_user) != 0 && !$token_from_db) {
-
+        $token_from_db = findTokenInDatabase($this->db, $currentUser);
+        if($token_from_db == null){
+            //echo "insert";
+            // Create a new token if a user is found but not a token corresponding to whom.
             $key = "your_secret_key";
-
             $payload = array(
-                "iss"     => "http://your-domain.com",
-                "iat"     => time(),
-                "exp"     => time() + (3600 * 24 * 15),
-                "context" => [
-                    "user" => [
-                        "user_login" => $current_user['user_login'],
-                        "user_id"    => $current_user['user_id']
-                    ]
-                ]
-            );
-
+                "iss" => "http://your-domain.com", 
+                "iat" => time(), "exp" => time() + (3600 * 24 * 15), 
+                "context" => ["user" => ["userName" => $currentUser['userName'], 
+                "userId" => $currentUser['userId']]]);
             try {
-                $jwt = JWT::encode($payload, $key);
-            } catch (Exception $e) {
-                echo json_encode($e);
+                $token = JWT::encode($payload, $key);
+            } catch(Exception $e) {
+                echo "encode error: "+ $e->getMessage();
             }
 
-            $sql = "INSERT INTO tokens (user_id, value, date_created, date_expiration)
-                VALUES (:user_id, :value, :date_created, :date_expiration)";
-            try {
-                $db = $this->db;
-                $stmt = $db->prepare($sql);
-                $stmt->bindParam("user_id", $current_user['user_id']);
-                $stmt->bindParam("value", $jwt);
-                $stmt->bindParam("date_created", $payload['iat']);
-                $stmt->bindParam("date_expiration", $payload['exp']);
-                $stmt->execute();
-                $db = null;
-
-                echo json_encode([
-                    "token"      => $jwt,
-                    "user_login" => $current_user['user_id']
-                ]);
-            } catch (PDOException $e) {
-                echo '{"error":{"text":' . $e->getMessage() . '}}';
-            }
+            insertToken($this->db, $token, $payload, $currentUser);
+            $token_from_db = findTokenInDatabase($this->db, $currentUser);
         }
+        return $response->withStatus(200)->withJson([
+            "token" => $token_from_db->value, 
+            "userId" => $token_from_db->user_id, 
+            "createdDate" => $token_from_db->user_id, 
+            "expirationDate" => $token_from_db->user_id, 
+        ]);
     }
 });
+function findTokenInDatabase($db, $currentUser) {
+    // Find a corresponding token.
+    $sql = "SELECT * FROM tokens
+            WHERE user_id = :userId AND expiration_date >" . time();
+    $token_from_db = null;
+    try {
+        $stmt = $db->prepare($sql);
+        $stmt->bindParam("userId", $currentUser['userId']);
+        $stmt->execute();
+        $token_from_db = $stmt->fetchObject();
+        $db = null;
+        return $token_from_db;
+    } catch(PDOException $e) {
+        echo '{"error":{"text":' . $e->getMessage() . '}}';
+    }
+    return $token_from_db;
+}
+
+function insertToken($db, $token, $payload, $currentUser){
+    $sql = "INSERT INTO tokens (user_id, value, created_date, expiration_date)
+                VALUES (:user_id, :value, :created_date, :expiration_date)";
+    try {
+        $stmt = $db->prepare($sql);
+        $stmt->bindParam("user_id", $currentUser['userId']);
+        $stmt->bindParam("value", $token);
+        $stmt->bindParam("created_date", $payload['iat']);
+        $stmt->bindParam("expiration_date", $payload['exp']);
+        $stmt->execute();
+        $db = null;
+        return true;
+    } catch(PDOException $e) {
+        echo '{"error":{"text":' . $e->getMessage() . '}}';
+    }
+    return false;
+}
 
 // The route to get a secured data.
 $app->get('/restricted', function (Request $request, Response $response) {
-
     $jwt = $request->getHeaders();
-
     $key = "your_secret_key";
-
     try {
         $decoded = JWT::decode($jwt['HTTP_AUTHORIZATION'][0], $key, array('HS256'));
-    } catch (UnexpectedValueException $e) {
+    }
+    catch(Exception $e) {
         echo $e->getMessage();
     }
-
     if (isset($decoded)) {
         $sql = "SELECT * FROM tokens WHERE user_id = :user_id";
-
         try {
             $db = $this->db;
             $stmt = $db->prepare($sql);
@@ -118,15 +98,12 @@ $app->get('/restricted', function (Request $request, Response $response) {
             $stmt->execute();
             $user_from_db = $stmt->fetchObject();
             $db = null;
-
             if (isset($user_from_db->user_id)) {
-                echo json_encode([
-                    "response" => "This is your secure resource !"
-                ]);
+                return $response->withStatus(401)->withJson("This is your secure resource");
             }
-        } catch (PDOException $e) {
+        }
+        catch(PDOException $e) {
             echo '{"error":{"text":' . $e->getMessage() . '}}';
         }
     }
 });
-
